@@ -1,19 +1,32 @@
-# Earlybird Jobs Browser Extension
-This extension allows LinkedIn users to sort and filter jobs from their personalized LinkedIn 
-recommended feed. You can install the extension from the Chrome webstore [here](https://chromewebstore.google.com/detail/earlybird-jobs-find-and-a/dhogfpnpeafodclcnigbfedmcnmahefc?authuser=1&hl=en). If you'd like to build and load the extension
-to your browser yourself, you can follow the steps below.
+# Connection Job Finder - Chrome Extension
 
+This browser extension helps you leverage your professional network in your job search. It works by highlighting job postings on LinkedIn from companies where you already have a connection, giving you a clear signal of where you have a "warm" lead.
 
-## Getting Started
+## How It Works
 
-First, run the development server:
+1.  **Download Your Connections:** Go to your LinkedIn settings (`Data Privacy` > `Get a copy of your data`) and download your **Connections** as a `.csv` file.
+2.  **Upload to the Extension:** Open the extension's sidebar on the LinkedIn jobs page and upload the `connections.csv` file you just downloaded.
+3.  **Find Opportunities:** The extension will automatically highlight jobs from companies where your connections work, both on the main LinkedIn page and within the extension's sidebar. You can also filter the list to see only jobs where you have a connection.
 
-```bash
-pnpm dev
-# or
-npm run dev
-```
-Open your browser and load the appropriate development build. For example, if you are developing for the chrome browser, using manifest v3, use: `build/chrome-mv3-dev`.
+## Getting Started (for Development)
 
-# Other Information
-This extension was built using my [browser-extension-starter-plasmo-shadcn-trpc](https://github.com/poweroutlet2/browser-extension-starter-plasmo-shadcn-trpc) template.
+To run and test this extension locally, follow these steps:
+
+1.  **Install Dependencies:**
+    ```bash
+    pnpm install
+    ```
+
+2.  **Run the Development Server:**
+    ```bash
+    pnpm dev
+    ```
+    This command will watch for file changes and rebuild the extension automatically.
+
+3.  **Load the Extension in Your Browser:**
+    *   Open Chrome and navigate to `chrome://extensions`.
+    *   Enable **"Developer mode"** using the toggle switch in the top-right corner.
+    *   Click the **"Load unpacked"** button.
+    *   Select the `build/chrome-mv3-dev` directory from this project. The extension should now appear in your list of extensions.
+
+You can now navigate to the [LinkedIn Jobs](https://www.linkedin.com/jobs/) page to start testing.
