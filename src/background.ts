@@ -2,8 +2,8 @@ import { Storage } from "@plasmohq/storage"
 import { initTRPC } from '@trpc/server';
 import { createChromeHandler } from 'trpc-chrome/adapter';
 import { z } from 'zod';
-import { AnalyticsEvent, LogEvent } from "~analytics";
-import { db, type JobPosting, type KeywordCount } from "~db";
+import Papa from 'papaparse';
+import { db, type JobPosting } from "~db";
 
 /**
  * On install, generate a random client ID and store it in sync storage.
@@ -11,37 +11,11 @@ import { db, type JobPosting, type KeywordCount } from "~db";
  */
 chrome.runtime.onInstalled.addListener(async (details) => {
     if (details.reason == "install") {
-        // Generate a random client ID.
-        let clientId;
-
-        if (process.env.NODE_ENV == 'development') {
-            clientId = 'development'
-        } else {
-            clientId = self.crypto.randomUUID()
-        }
-
-        // Storing in sync so that the client ID is synced across a user's devices.
-        const storage = new Storage({
-            area: "sync"
-        })
-
+        let clientId = self.crypto.randomUUID()
+        const storage = new Storage({ area: "sync" })
         await storage.set("clientId", clientId)
-
-        const platform = await chrome.runtime.getPlatformInfo()
-        const locale = await chrome.i18n.getUILanguage()
-        // Send a new_install event to Google Analytics.
-        await AnalyticsEvent([
-            {
-                name: "new_install",
-                params: {
-                    operating_system: platform.os,
-                    locale: locale
-                }
-            }
-        ])
     }
 })
-
 
 const t = initTRPC.create({
     isServer: false,
@@ -49,66 +23,63 @@ const t = initTRPC.create({
 });
 
 const appRouter = t.router({
+    getSavedJobs: t.procedure
+        .query(async () => {
+            return { jobs: await db.jobPostings.toArray() };
+        }),
+
+    uploadConnectionsCsv: t.procedure
+        .input(z.object({ csvContent: z.string() }))
+        .mutation(async ({ input }) => {
+            try {
+                const results = Papa.parse(input.csvContent, {
+                    header: true,
+                    skipEmptyLines: true,
+                });
+
+                const companies = new Set<string>();
+                for (const row of results.data) {
+                    const company = row['Company'];
+                    if (company) {
+                        companies.add(company.trim());
+                    }
+                }
+
+                const companyList = Array.from(companies).map(name => ({ name }));
+
+                await db.transaction('rw', db.connectionCompanies, async () => {
+                    await db.connectionCompanies.clear();
+                    await db.connectionCompanies.bulkAdd(companyList);
+                });
+
+                return { success: true, count: companyList.length };
+            } catch (error) {
+                console.error('Error parsing or saving CSV:', error);
+                throw new Error('Failed to process connections CSV');
+            }
+        }),
+
     refreshJobs: t.procedure
         .query(async () => {
             try {
-                await AnalyticsEvent([
-                    {
-                        name: "refresh_jobs",
-                        params: {
-                            operating_system: (await chrome.runtime.getPlatformInfo()).os,
-                            locale: await chrome.i18n.getUILanguage()
-                        }
-                    }
-                ])
-                const jobs = await getJobsFromAllCollections();
+                const jobs = await scrapeJobs();
+                const connectionCompanies = await db.connectionCompanies.toArray();
+                const companyNames = new Set(connectionCompanies.map(c => c.name.toLowerCase()));
 
-                // select keywordCounts from db to get sorted by count
-                const keywordCounts = await getSavedKeywordCounts()
-                const viewedJobs = await getSavedViewedJobs()
+                const processedJobs = jobs.map(job => ({
+                    ...job,
+                    hasConnection: companyNames.has(job.company.toLowerCase()),
+                }));
 
-                return { jobs, keywordCounts, viewedJobs };
+                await db.transaction('rw', db.jobPostings, async () => {
+                    await db.jobPostings.clear();
+                    await db.jobPostings.bulkAdd(processedJobs);
+                });
+
+                return { jobs: processedJobs };
             } catch (error) {
-                console.error('Error fetching jobs:', error);
+                console.error('Error fetching or processing jobs:', error);
                 throw new Error('Failed to fetch jobs');
-            }
-        }),
-    getSavedJobs: t.procedure
-        .query(async () => {
-            return { jobs: await getSavedJobs(), keywordCounts: await getSavedKeywordCounts(), viewedJobs: await getSavedViewedJobs() };
-        }),
-    saveViewedJob: t.procedure
-        .input(z.object({ jobId: z.string() }))
-        .mutation(async ({ input }) => {
-            await saveViewedJob(input.jobId)
-        }),
-    submitFeedback: t.procedure
-        .input(z.object({
-            feedback: z.object({
-                type: z.string(),
-                email: z.string(),
-                subject: z.string(),
-                description: z.string()
-            })
-        }))
-        .mutation(async ({ input }) => {
-            try {
-                await AnalyticsEvent([
-                    {
-                        name: "submit_feedback",
-                        params: {
-                            feedback_type: input.feedback.type,
-                            has_email: !!input.feedback.email,
-                            description: input.feedback.description,
-                            operating_system: (await chrome.runtime.getPlatformInfo()).os,
-                            locale: await chrome.i18n.getUILanguage()
-                        }
-                    }
-                ])
-                return { success: true }
-            } catch (error) {
-                console.error('Error submitting feedback:', error)
-                throw new Error('Failed to submit feedback')
             }
         }),
 });
@@ -119,56 +90,7 @@ createChromeHandler({
     router: appRouter,
 });
 
-
-console.log("Background Script Initialized")
-
-const jobCollectionSlugs = [
-    "recommended",
-    "remote-jobs",
-    "unicorn-companies",
-    "work-life-balance",
-    "education",
-    "apparel-and-fashion",
-    "government",
-    "it-services-and-it-consulting",
-    "top-tech",
-    "future-of-work",
-    "hospitals-and-healthcare",
-    "e-sports",
-    "metaverse",
-    "top-companies",
-    "pro-sport-teams-and-leagues",
-    "education-benefits",
-    "easy-apply",
-    "social-impact",
-    "top-healthcare",
-    "top-startups",
-    "hybrid",
-    "family-friendly",
-    "gaming",
-    "media",
-    "non-profits",
-    "small-business",
-    "k-12-edu",
-    "parental-leave",
-    "career-growth",
-    "female-founded",
-    "transportation-and-logistics",
-    "pharmaceuticals",
-    "hospitality",
-    "student-loan-assist",
-    "publishing",
-    "beauty",
-    "climate-and-cleantech",
-    "unlimited-vacation",
-    "biotechnology",
-    "entertainment",
-    "yc-funded",
-    "early-stage-startups",
-    "gen-ai"
-]
-
-
+// Listener to capture the LinkedIn CSRF token
 chrome.webRequest.onBeforeSendHeaders.addListener((details) => {
     const storage = new Storage()
     const headers = details.requestHeaders
@@ -176,65 +98,27 @@ chrome.webRequest.onBeforeSendHeaders.addListener((details) => {
         const last_updated = parseInt(result)
         const expired = (!result || Date.now() - last_updated > 32000)
         if (expired) {
-            let csrfToken = ''
-
-            // Check the 6th element first
-            if (headers[6] && headers[6].name.toLowerCase() === 'csrf-token') {
-                csrfToken = headers[6].value
-            } else {
-                // If not found, search the entire array
-                const csrfHeader = headers.find(header => header.name.toLowerCase() === 'csrf-token')
-                if (csrfHeader) {
-                    csrfToken = csrfHeader.value
-                }
-            }
-
-            if (csrfToken) {
-                console.log("Setting token...")
-                await storage.set('linkedin-token', csrfToken)
+            const csrfHeader = headers.find(header => header.name.toLowerCase() === 'csrf-token')
+            if (csrfHeader?.value) {
+                await storage.set('linkedin-token', csrfHeader.value)
                 await storage.set('linkedin-token-last-updated', Date.now().toString())
             }
         }
     })
 }, {
-    urls: [
-        "https://www.linkedin.com/voyager/api/*", // us
-    ],
-}, ["requestHeaders", "extraHeaders"]);
+    urls: ["https://www.linkedin.com/voyager/api/*"],
+}, ["requestHeaders"]);
 
 
-
-
-interface JobFetchParams {
-    count?: number;
-    start?: number;
-    jobCollectionSlug?: string;
-}
-
-
-async function fetchLinkedInJobsList({ count = 50, start = 0, jobCollectionSlug = "recommended" }: JobFetchParams): Promise<any> {
+// Simplified job scraping logic
+async function scrapeJobs(): Promise<JobPosting[]> {
     const storage = new Storage()
     const token = await storage.get('linkedin-token')
-    const origin = "GENERIC_JOB_COLLECTIONS_LANDING"
-    const url = `https://www.linkedin.com/voyager/api/graphql?variables=(count:${count},jobCollectionSlug:${jobCollectionSlug},query:(origin:${origin}),start:${start})&queryId=voyagerJobsDashJobCards.a18f4e75c4ec13a6acae19909e362b3b`;
+    const url = `https://www.linkedin.com/voyager/api/graphql?variables=(count:50,jobCollectionSlug:recommended,query:(origin:GENERIC_JOB_COLLECTIONS_LANDING),start:0)&queryId=voyagerJobsDashJobCards.a18f4e75c4ec13a6acae19909e362b3b`;
 
     const headers = {
         "accept": "application/vnd.linkedin.normalized+json+2.1",
-        "accept-language": "en-US,en;q=0.9",
         "csrf-token": token,
-        "priority": "u=1, i",
-        "sec-ch-ua": "\"Chromium\";v=\"128\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"128\"",
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": "\"Windows\"",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
-        "x-li-lang": "en_US",
-        //"x-li-page-instance": liPageInstance,
-        "x-li-pem-metadata": "Voyager - Careers - Job Collections=job-collection-pagination-fetch",
-        "x-li-prefetch": "1",
-        "x-li-track": "{\"clientVersion\":\"1.13.23011\",\"mpVersion\":\"1.13.23011\",\"osName\":\"web\",\"timezoneOffset\":-4,\"timezone\":\"America/New_York\",\"deviceFormFactor\":\"DESKTOP\",\"mpName\":\"voyager-web\",\"displayDensity\":1.25,\"displayWidth\":3200,\"displayHeight\":1800}",
-        "x-restli-protocol-version": "2.0.0"
     };
 
     try {
@@ -244,383 +128,45 @@ async function fetchLinkedInJobsList({ count = 50, start = 0, jobCollectionSlug 
             credentials: 'include',
         });
 
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
         const data = await response.json();
-        return data.included;
-    } catch (error) {
-        console.error('Error fetching job list :', error);
-        throw error;
-    }
-}
+        const rawData = data.included;
+        const allJobPostings: JobPosting[] = [];
 
+        rawData.forEach((entry: any) => {
+            if (entry['preDashNormalizedJobPostingUrn']) {
+                try {
+                    const primaryDescription: string[] = entry.primaryDescription?.text.split("·");
+                    const company = primaryDescription.at(0)?.trim() || '';
+                    const location = primaryDescription.at(1)?.trim() || entry.secondaryDescription?.text.split("·").at(0)?.trim() || '';
 
-function getJobId(urn: string) {
-    return urn.match(/\b\d+\b/gm)[0]
-}
-
-async function getJobsFromCollection(jobCollectionSlug?: string, runId?: number) {
-    let rawData: any = []
-    let allJobPostings: JobPosting[] = []
-    const count = 50 // jobs per page
-    const repostedJobIds = new Set<string>()
-    const pagesToFetch = 2
-
-    for (let page = 0; page < pagesToFetch; page++) {
-        const start = page * count
-        try {
-            // Fetch the current page of jobs
-            rawData = await fetchLinkedInJobsList({
-                jobCollectionSlug,
-                start,
-                count
-            });
-
-            if (jobCollectionSlug == 'recommended') console.log(rawData)
-
-            // If no job postings are found, break early
-            const hasJobPostings = rawData.some((entry: any) => entry['preDashNormalizedJobPostingUrn'])
-            if (!hasJobPostings) {
-                break
-            }
-
-            // Process the current page
-            const jobPostings: JobPosting[] = []
-            console.log(rawData)
-            // each posting should have a jobPosting entity with additional info
-            rawData.forEach((entry: any) => {
-                const posting: string = entry['preDashNormalizedJobPostingUrn']
-                const reposted: boolean = entry.repostedJob
-                if (reposted) {
-                    repostedJobIds.add(getJobId(entry.entityUrn))
-                }
-                if (posting) {
-                    let currentField = 'initial';
-                    try {
-                        currentField = 'initializing job properties';
-                        let applicantCount = '?'
-                        let listingDate
-                        let promoted = false
-                        let easyApply = false
-                        let companyAlumni = 0
-                        let schoolAlumni = 0
-                        let connections = 0
-
-                        currentField = 'processing footerItems';
-                        entry.footerItems.forEach((item) => {
-                            if (item.type == "LISTED_DATE") {
-                                listingDate = item.timeAt
-                            }
-                            if (item.type == "APPLICANT_COUNT_TEXT") {
-                                applicantCount = item?.text?.text.split(" ")[0]
-                                if (applicantCount.toLowerCase() == 'be') {
-                                    applicantCount = '<25'
-                                }
-                            }
-                        })
-
-                        currentField = 'processing jobInsightsV2ResolutionResults';
-                        entry.jobInsightsV2ResolutionResults.forEach((item) => {
-                            const itemText = item.insightViewModel?.text?.text
-                            if (itemText == 'Easy Apply') {
-                                easyApply = true
-                            }
-
-                            if (itemText?.includes('company')) {
-                                companyAlumni = itemText.split(" ")[0]
-                            }
-
-                            if (itemText?.includes('school')) {
-                                schoolAlumni = itemText.split(" ")[0]
-                            }
-
-                            if (itemText?.includes('connections')) {
-                                connections = itemText
-                            }
-                        })
-
-                        currentField = 'processing logo for companyLink';
-                        let companyLink = entry.logo?.actionTarget
-
-                        currentField = 'processing tertiaryDescription for salary';
-                        let salary: string = entry.tertiaryDescription?.text?.split("·")[0]
-                        if (salary && salary[0] !== '$') {
-                            salary = 'Not Sepcified'
-                        }
-                        
-                        currentField = 'processing primaryDescription for company and location';
-                        let company = ''
-                        let location = '' 
-                        const primaryDescription: string[] = entry.primaryDescription?.text.split("·")
-                        company = primaryDescription.at(0)
-                        if (primaryDescription.length > 1) {
-                            location = primaryDescription.at(1)
-                        } else {
-                            const secondaryDescription: string[] = entry.secondaryDescription?.text.split("·")
-                            location = secondaryDescription.at(0 )
-                        }
-
-
-                        currentField = 'extracting jobId';
-                        const jobId = getJobId(entry.entityUrn)
-
-                        currentField = 'creating job posting object';
-                        jobPostings.push({
-                            urn: entry.entityUrn,
-                            jobId: jobId,
-                            jobCollectionSlug: jobCollectionSlug,
-                            runId: runId.toString(),
-                            title: entry.title?.text,
-                            company: company,
-                            companyLink: companyLink,
-                            salary: salary,
-                            location: location,
-                            remote: location.includes("Remote"),
-                            listingDate,
-                            reposted: repostedJobIds.has(jobId),
-                            applicantCount,
-                            promoted: promoted,
-                            easyApply: easyApply,
-                            companyAlumni: companyAlumni,
-                            schoolAlumni: schoolAlumni,
-                            connections: connections
-                        })
-                    } catch (error: any) {
-                        const errorMessage = `Ingestion error: error processing job posting at field: ${currentField} in collection ${jobCollectionSlug}`
-                        console.error(errorMessage, error, entry);
-                        LogEvent({
-                            event_type: 'error',
-                            event_data: {
-                                error: error,
-                                errorMessage: errorMessage,
-                                entry: entry
-                            },
-                            user_type: 'earlybird-extension'
-                        })
-                        throw error;
-                    }
-                }
-            });
-
-            // Add the current page's jobs to our collection
-            allJobPostings = [...allJobPostings, ...jobPostings]
-
-        } catch (error) {
-            console.log(`Error fetching jobs from collection '${jobCollectionSlug}' at start=${start}:`, error);
-            break
-        }
-    }
-
-    console.log(`Fetched ${allJobPostings.length} jobs from ${jobCollectionSlug}`)
-    return allJobPostings;
-}
-
-interface JobDetailResponse {
-    numApplicants?: string;
-    description?: string;
-    applyUrl?: string;
-    error?: string;
-}
-
-interface BatchJobDetailsResponse {
-    [jobId: string]: JobDetailResponse;
-}
-
-async function fetchJobDetailsBatch(jobPostings: JobPosting[], url: string, batchSize = 20, retries = 0, delay = 1000) {
-    // Group jobs that need details
-    const jobsNeedingDetails = jobPostings.filter(job => job.applicantCount === '?');
-
-    // Split into batches of batchSize
-    const batches = [];
-    for (let i = 0; i < jobsNeedingDetails.length; i += batchSize) {
-        batches.push(jobsNeedingDetails.slice(i, i + batchSize));
-    }
-
-    // Process each batch concurrently
-    const processBatch = async (batch: JobPosting[], attemptNum = 0): Promise<void> => {
-        try {
-            const jobIds = batch.map(job => job.jobId);
-            const response = await fetch(url, {
-                method: "POST",
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ jobIds })
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const data: BatchJobDetailsResponse = await response.json();
-
-            // Update each job in the batch with its details
-            for (const job of batch) {
-                const jobDetails = data[job.jobId];
-                if (jobDetails?.numApplicants) {
-                    job.applicantCount = jobDetails.numApplicants;
-                } else if (jobDetails?.error) {
-                    // console.warn(`Error fetching details for job ${job.jobId}:`, jobDetails.error);
-                }
-                if (jobDetails?.applyUrl) {
-                    const applyUrl = (jobDetails.applyUrl.replace(/&amp;/g, '&')).replace('&urlHash', '')
-                    job.applyUrl = decodeURIComponent(applyUrl)
+                    const newJob: JobPosting = {
+                        urn: entry.entityUrn,
+                        jobId: entry.entityUrn.match(/\b\d+\b/gm)[0],
+                        runId: Date.now().toString(),
+                        title: entry.title?.text,
+                        company: company,
+                        companyLink: entry.logo?.actionTarget,
+                        location: location,
+                        remote: location.toLowerCase().includes("remote"),
+                        listingDate: entry.footerItems?.find(item => item.type === "LISTED_DATE")?.timeAt,
+                        salary: entry.tertiaryDescription?.text?.split("·")[0]?.trim() || '',
+                        applyUrl: '', // This needs a separate, more complex call, omitting for now.
+                        hasConnection: false, // Will be set later
+                    };
+                    allJobPostings.push(newJob);
+                } catch (e) {
+                    console.error("Error parsing a job entry:", e, entry);
                 }
             }
-
-            // Log progress
-            // console.log(`Processed batch of ${batch.length} jobs. Success: ${Object.values(data).filter(d => d.numApplicants).length
-            //     }, Failed: ${Object.values(data).filter(d => d.error).length
-            //     }`);
-
-        } catch (error) {
-            if (attemptNum < retries) {
-                const nextDelay = delay * Math.pow(2, attemptNum); // Exponential backoff
-                console.log(`Batch retry in ${nextDelay / 1000} seconds... (${retries - attemptNum} retries left)`);
-                await new Promise(resolve => setTimeout(resolve, nextDelay));
-                // Retry this specific batch
-                return processBatch(batch, attemptNum + 1);
-            }
-            throw error; // Re-throw if out of retries
-        }
-    };
-
-    try {
-        await Promise.all(batches.map(batch => processBatch(batch)));
-    } catch (error) {
-        console.error('Error fetching batch job details after all retries:', error);
-    }
-}
-
-async function getJobsFromAllCollections(): Promise<JobPosting[]> {
-    try {
-        const storage = new Storage()
-        const runId = Date.now()
-        storage.set('last-time-refereshed', runId)
-
-        const allJobPromises = jobCollectionSlugs.map(slug => getJobsFromCollection(slug, runId));
-        const allJobsNested = await Promise.all(allJobPromises);
-
-        const allJobs = allJobsNested.flat();
-
-        // dedupe
-        const uniqueJobs = Array.from(new Map(allJobs.map(job => [job.jobId, job])).values());
-
-        const url = `${process.env.PLASMO_PUBLIC_BASE_API_URL}/api/linkedin-jobdetails-bulk`;
-
-        console.log("Total jobs:", uniqueJobs.length);
-        console.log("Initial applicant counts:", uniqueJobs.filter(job => job.applicantCount !== "?").length);
-
-        // fetch details for all jobs in batches
-        await fetchJobDetailsBatch(uniqueJobs, url);
-
-        console.log("Final applicant counts:", uniqueJobs.filter(job => job.applicantCount !== "?").length);
-
-        const keywordCounts: KeywordCount[] = [];
-        const aggregatedKeywords = new Map<string, number>();
-
-        // process each job title and aggregate keyword counts
-        uniqueJobs.forEach(job => {
-            const jobKeywords = extractKeywords(job.title);
-            jobKeywords.forEach((count, keyword) => {
-                aggregatedKeywords.set(
-                    keyword,
-                    (aggregatedKeywords.get(keyword) || 0) + count
-                );
-            });
         });
 
-        // convert the aggregated counts to KeywordCount objects
-        aggregatedKeywords.forEach((count, keyword) => {
-            keywordCounts.push({
-                keyword,
-                count
-            });
-        });
-
-        try {
-            await db.transaction('rw', db.jobPostings, db.keywordCounts, async () => {
-                await db.jobPostings.clear();
-                await db.keywordCounts.clear();
-
-                await db.jobPostings.bulkAdd(uniqueJobs);
-                await db.keywordCounts.bulkAdd(keywordCounts);
-            });
-        } catch (error) {
-            console.error('Error saving jobs and keywords to IndexedDB:', error);
-        }
-
+        const uniqueJobs = Array.from(new Map(allJobPostings.map(job => [job.jobId, job])).values());
         return uniqueJobs;
+
     } catch (error) {
-        console.error('Error fetching jobs from all collections:', error);
+        console.error('Error fetching job list:', error);
         throw error;
     }
 }
-
-async function getSavedJobs() {
-    try {
-        return db.jobPostings.toArray()
-    } catch (error) {
-        console.error('Error fetching saved jobs from IndexedDB', error);
-        throw error
-    }
-}
-
-async function getSavedKeywordCounts() {
-    try {
-        return db.keywordCounts.orderBy('count').reverse().toArray()
-    } catch (error) {
-        console.error('Error fetching saved keyword counts from IndexedDB', error.message);
-    }
-}
-
-async function getSavedViewedJobs() {
-    try {
-        const result = await db.viewedJobs.toArray()
-        return result.map(job => job.jobId)
-    } catch (error) {
-        console.error('Error fetching saved viewed jobs from IndexedDB: ', error.message);
-    }
-}
-
-async function saveViewedJob(jobId: string) {
-    try {
-        await db.viewedJobs.put({ jobId, viewedAt: new Date().toISOString() })
-    } catch (error) {
-        console.error('Error saving viewed job to IndexedDB: ', error.message);
-    }
-}
-
-
-function extractKeywords(title: string): Map<string, number> {
-    const keywords = new Map<string, number>();
-
-    // Convert to lowercase and remove special characters
-    const cleanTitle = title.toLowerCase().replace(/[^\w\s]/g, '').trim();
-
-    // Single words
-    const words = cleanTitle.split(/\s+/);
-    words.forEach(word => {
-        if (word.length >= 2) { // Only count words with 2 or more characters
-            keywords.set(word, (keywords.get(word) || 0) + 1);
-        }
-    });
-
-    // // Phrases (2-3 words)
-    // for (let i = 0; i < words.length - 1; i++) {
-    //     // Two-word phrases
-    //     const phrase2 = words.slice(i, i + 2).join(' ');
-    //     keywords.set(phrase2, (keywords.get(phrase2) || 0) + 1);
-
-    //     // Three-word phrases
-    //     if (i < words.length - 2) {
-    //         const phrase3 = words.slice(i, i + 3).join(' ');
-    //         keywords.set(phrase3, (keywords.get(phrase3) || 0) + 1);
-    //     }
-    // }
-
-    return keywords;
-}
-

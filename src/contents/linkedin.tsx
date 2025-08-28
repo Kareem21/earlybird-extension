@@ -1,21 +1,16 @@
 import { Button } from "~components/ui/button"
 import { createTRPCProxyClient } from "@trpc/client"
 import cssText from "data-text:~style.css"
-import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Filter, Loader2, RefreshCcw, MessageCircleMoreIcon, AlertTriangle, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Loader2, RefreshCcw, Upload } from 'lucide-react'
 import type { PlasmoCSConfig } from "plasmo"
-import React, { useCallback, useEffect, useState } from "react"
+import React, { useCallback, useEffect, useState, useRef } from "react"
 import { chromeLink } from "trpc-chrome/link"
-
 import { useStorage } from "@plasmohq/storage/hook"
 
-import type { JobPosting, KeywordCount} from "~db"
-import { FilterSection } from "~components/sidebar/FilterSection"
+import type { JobPosting } from "~db"
 import { JobList } from "~components/sidebar/JobList"
-import { formatListingDate } from "~components/sidebar/utils"
-import { FeedbackForm } from "~components/sidebar/FeedbackForm"
-
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~components/ui/tooltip"
-import { RefreshWarningOverlay } from "~components/sidebar/RefreshWarningPopup"
+import { Switch } from "~components/ui/switch"
+import { Label } from "~components/ui/label"
 import type { AppRouter } from "~background"
 
 const port = chrome.runtime.connect()
@@ -33,211 +28,133 @@ export const getStyle = () => {
   return style
 }
 
-function getJobId(url: string) {
-  const match = url.match(/((?<=\/view\/)|(?<=currentJobId=))([^"]*?)(?=\/\?|\/|\?|\/|$|&)/gm)
-  if (!match || match.length == 0) {
-    return undefined
-  }
-  return match[0]
-}
-
 export default function App() {
-  const [isOpen, setIsOpen] = useStorage("earlybird-isOpen", (v) =>
-    v === undefined ? false : v
-  )
+  const [isOpen, setIsOpen] = useStorage("earlybird-isOpen", (v) => v === undefined ? false : v)
   const [jobs, setJobs] = useState<JobPosting[]>([])
-  const [keywordCounts, setKeywordCounts] = useState<KeywordCount[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [includeKeywords, setIncludeKeywords] = useStorage<string[]>("earlybird-includeKeywords", [])
-  const [excludeKeywords, setExcludeKeywords] = useStorage<string[]>("earlybird-excludeKeywords", [])
-  const [filterOptions, setFilterOptions] = useStorage("earlybird-filterOptions", {
-    companies: [],
-    locations: [],
-    excludePromoted: false,
-    excludeViewed: false,
-    showReposted: false,
-    showEasyApply: true,
-    showExternal: true
-  })
-  const [isFiltersExpanded, setIsFiltersExpanded] = useStorage("earlybird-isFiltersExpanded", false)
-  const [isFeedbackOpen, setIsFeedbackOpen] = useState(false)
-  const [lastRefreshTime, setLastRefreshTime] = useStorage<number>("earlybird-lastRefreshTime", 0)
-  const [showRefreshWarning, setShowRefreshWarning] = useState(false)
-  const [viewedJobs, setViewedJobs] = useState<Set<string>>(new Set())
+  const [showConnectionsOnly, setShowConnectionsOnly] = useStorage("earlybird-showConnectionsOnly", false)
+  const [connectionCount, setConnectionCount] = useStorage("earlybird-connectionCount", 0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const toggleSidebar = useCallback(
-    () => setIsOpen(!isOpen),
-    [isOpen, setIsOpen]
-  )
+  const toggleSidebar = useCallback(() => setIsOpen(!isOpen), [isOpen, setIsOpen])
 
   useEffect(() => {
     const fetchJobs = async () => {
-      const { jobs: fetchedJobs, keywordCounts: fetchedKeywordCounts, viewedJobs } = await chromeClient.getSavedJobs.query()
+      const { jobs: fetchedJobs } = await chromeClient.getSavedJobs.query()
       setJobs(fetchedJobs as JobPosting[])
-      setKeywordCounts(fetchedKeywordCounts as KeywordCount[])
-      setViewedJobs(new Set(viewedJobs))
     }
     fetchJobs()
-  
-    const currentJobId = getJobId(window.location.href)
-    if (currentJobId && !viewedJobs.has(currentJobId)) {
-      chromeClient.saveViewedJob.mutate({ jobId: currentJobId })
-    }
   }, [])
 
-  const checkRefreshTime = () => {
-    const currentTime = Date.now()
-    const timeSinceLastRefresh = currentTime - lastRefreshTime
-    const thirtyMinutesInMs = 30 * 60 * 1000
+  useEffect(() => {
+    // Clear previous highlights
+    document.querySelectorAll('.earlybird-highlight').forEach(el => {
+      el.classList.remove('earlybird-highlight');
+    });
 
-    if (timeSinceLastRefresh < thirtyMinutesInMs) {
-      setShowRefreshWarning(true)
-      return false
-    }
-    return true
-  }
-
-  const refreshJobs = useCallback(async (force = false) => {
-    setShowRefreshWarning(false)
+    const jobsWithConnection = jobs.filter(job => job.hasConnection);
     
-    if (!force && !checkRefreshTime()) {
-      return
+    if (jobsWithConnection.length > 0) {
+        jobsWithConnection.forEach(job => {
+            // LinkedIn job cards can be identified by an attribute containing their URN
+            const jobCard = document.querySelector(`li[data-entity-urn='${job.urn}']`);
+            if (jobCard) {
+                jobCard.classList.add('earlybird-highlight');
+            }
+        });
     }
+  }, [jobs]);
 
+  const refreshJobs = useCallback(async () => {
     setIsLoading(true)
     setError(null)
     try {
-      const { jobs: fetchedJobs, keywordCounts: fetchedKeywordCounts } = await chromeClient.refreshJobs.query()
+      const { jobs: fetchedJobs } = await chromeClient.refreshJobs.query()
       setJobs(fetchedJobs as JobPosting[])
-      setKeywordCounts(fetchedKeywordCounts as KeywordCount[])
-      setLastRefreshTime(Date.now())
     } catch (err) {
       setError("Failed to fetch jobs. Please try again.")
     } finally {
       setIsLoading(false)
-      setShowRefreshWarning(false)
     }
-  }, [lastRefreshTime])
+  }, [setJobs, setIsLoading, setError])
 
-  const handleFeedbackSubmit = async (feedback: {
-    type: string
-    email: string
-    subject: string
-    description: string
-  }) => {
-    try {
-      await chromeClient.submitFeedback.mutate({ feedback })
-    } catch (error) {
-      console.error("Failed to submit feedback:", error)
+  const handleCsvUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setIsLoading(true)
+    setError(null)
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      const content = e.target?.result as string
+      try {
+        const result = await chromeClient.uploadConnectionsCsv.mutate({ csvContent: content })
+        if (result.success) {
+          setConnectionCount(result.count)
+          await refreshJobs() // Refresh jobs to apply connection data
+        }
+      } catch (err) {
+        setError("Failed to upload or process CSV.")
+      } finally {
+        setIsLoading(false)
+      }
     }
+    reader.readAsText(file)
   }
 
   return (
-    <div
-      className={`fixed bg-bg border-l-8 border-black inset-y-0 right-0 w-full max-w-[34%] min-w-[40rem] drop-shadow-2xl flex flex-col transition-transform duration-200 ease-in-out p-1 ${isOpen ? "translate-x-0" : "translate-x-full"
-        }`}>
-      <Button
-        className="absolute -left-28 top-[3%] h-20 bg-main"
-        onClick={toggleSidebar}>
-        {isOpen ? (
-          <ChevronRight className="h-10 w-10" />
-        ) : (
-          <ChevronLeft className="h-10 w-10" />
-        )}
+    <div className={`fixed bg-bg border-l-8 border-black inset-y-0 right-0 w-full max-w-[34%] min-w-[40rem] drop-shadow-2xl flex flex-col transition-transform duration-200 ease-in-out p-1 ${isOpen ? "translate-x-0" : "translate-x-full"}`}>
+      <Button className="absolute -left-28 top-[3%] h-20 bg-main" onClick={toggleSidebar}>
+        {isOpen ? <ChevronRight className="h-10 w-10" /> : <ChevronLeft className="h-10 w-10" />}
       </Button>
       <div className="flex-1 overflow-hidden flex flex-col">
-        <div className="px-6 py-2 border-b bg-gradient-to-r from-primary to-primary-foreground text-primary-foreground">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-3xl font-bold">EarlyBird Job Finder</h2>
-            <TooltipProvider>
-              <Tooltip delayDuration={350}>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="default"
-                    size="icon"
-                    onClick={() => setIsFeedbackOpen(true)}
-                    className="h-8 w-8 justify-self-start fill-white">
-                    <MessageCircleMoreIcon className="h-5 w-5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent className="text-[1rem] ml-44">
-                  <p>Give some feedback!</p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+        <div className="px-6 py-4 border-b bg-gradient-to-r from-primary to-primary-foreground text-primary-foreground">
+          <h2 className="text-3xl font-bold mb-4">Connection Job Finder</h2>
+
+          <div className="bg-primary-foreground/10 p-4 rounded-lg mb-4 text-sm">
+            <h3 className="font-bold text-lg mb-2">How to use:</h3>
+            <ol className="list-decimal list-inside space-y-1">
+              <li>Go to LinkedIn's <a href="https://www.linkedin.com/mypreferences/d/download-my-data" target="_blank" rel="noopener noreferrer" className="underline">Data Privacy Settings</a>.</li>
+              <li>Select "Connections" and download your data as a CSV file.</li>
+              <li>Click the "Upload Connections CSV" button below and select the file.</li>
+            </ol>
           </div>
-          <div className="flex items-center space-x-4 relative">
-            <Button
-              onClick={() => setIsFiltersExpanded(!isFiltersExpanded)}
-              className="flex items-center">
-              <Filter className="mr-2 h-4 w-4" />
-              Filters
-              {isFiltersExpanded ? (
-                <ChevronUp className="ml-2 h-4 w-4" />
-              ) : (
-                <ChevronDown className="ml-2 h-4 w-4" />
-              )}
+
+          <div className="flex items-center space-x-4">
+            <input type="file" ref={fileInputRef} onChange={handleCsvUpload} accept=".csv" className="hidden" />
+            <Button onClick={() => fileInputRef.current?.click()} disabled={isLoading}>
+              <Upload className="mr-2 h-4 w-4" />
+              Upload Connections CSV
             </Button>
-            <Button onClick={() => refreshJobs()} disabled={isLoading}>
+            <Button onClick={refreshJobs} disabled={isLoading}>
               {isLoading ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Refreshing...
-                </>
+                <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Refreshing...</>
               ) : (
-                <>
-                  <RefreshCcw className="mr-2 h-4 w-4" />
-                  Refresh Jobs
-                </>
+                <><RefreshCcw className="mr-2 h-4 w-4" />Refresh Jobs</>
               )}
             </Button>
-            {showRefreshWarning && (
-              <div className="absolute top-full left-32">
-                <RefreshWarningOverlay
-                  onRefresh={() => refreshJobs(true)}
-                  onClose={() => setShowRefreshWarning(false)}
-                />
-              </div>
-            )}
-            {jobs && jobs.length > 0 && (
-              <p className="text-xs text-primary-foreground/80 mt-2">
-                Last refreshed: {formatListingDate(jobs[0].runId).text}
-              </p>
-            )}
           </div>
+          {connectionCount > 0 && <p className="text-xs mt-2">Loaded {connectionCount} companies from your connections.</p>}
         </div>
-        <div className={`overflow-auto earlybird-job-finder transition-all duration-300 ease-in-out ${isFiltersExpanded ? 'max-h-[600px]' : 'max-h-0'}`}>
-          <FilterSection
-            filterOptions={filterOptions}
-            setFilterOptions={setFilterOptions}
-            includeKeywords={includeKeywords}
-            setIncludeKeywords={setIncludeKeywords}
-            excludeKeywords={excludeKeywords}
-            setExcludeKeywords={setExcludeKeywords}
-            jobs={jobs}
-            onCollapse={() => setIsFiltersExpanded(false)}
-            isExpanded={isFiltersExpanded}
-            keywordCounts={keywordCounts}
-          />
+
+        <div className="p-4 flex items-center justify-between border-b">
+            <Label htmlFor="connections-only-switch" className="text-lg">
+                Show only jobs with connections
+            </Label>
+            <Switch
+                id="connections-only-switch"
+                checked={showConnectionsOnly}
+                onCheckedChange={setShowConnectionsOnly}
+            />
         </div>
+
         <JobList
           jobs={jobs}
-          viewedJobs={viewedJobs}
-          filterOptions={{
-            ...filterOptions,
-            excludeKeywords,
-            includeKeywords
-          }}
+          filterOptions={{ showConnectionsOnly }}
           error={error}
-          onFilterClick={() => setIsFiltersExpanded(true)}
         />
       </div>
-      <FeedbackForm
-        isOpen={isFeedbackOpen}
-        onClose={() => setIsFeedbackOpen(false)}
-        onSubmit={handleFeedbackSubmit}
-      />
     </div>
   )
 }
