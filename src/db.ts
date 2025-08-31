@@ -1,20 +1,12 @@
 import Dexie, { type Table } from 'dexie';
 
-export type JobPosting = {
-    id?: number,
-    runId?: string,
-    urn: string,
-    jobId: string,
-    title: string,
-    listingDate: string,
-    company: string,
-    companyLink?: string,
-    location: string,
-    remote: boolean,
-    salary: string,
-    description?: string,
-    applyUrl?: string,
-    hasConnection: boolean,
+export type Connection = {
+    url: string,
+}
+
+export type PersonProfile = {
+    url: string,
+    data: any,
 }
 
 export type ConnectionCompany = {
@@ -23,14 +15,16 @@ export type ConnectionCompany = {
 }
 
 export class DexieDB extends Dexie {
-    jobPostings!: Table<JobPosting>;
+    connections!: Table<Connection>;
+    personProfileCache!: Table<PersonProfile>;
     connectionCompanies!: Table<ConnectionCompany>;
 
     constructor() {
         super('EarlyBird');
         // these are the indexed columns, must update version number whenever making changes here
-        this.version(8).stores({
-            jobPostings: '++id, jobId, company, hasConnection',
+        this.version(9).stores({
+            connections: '&url', // index url and ensure it's unique
+            personProfileCache: '&url', // index url and ensure it's unique
             connectionCompanies: '++id, &name', // index name and ensure it's unique
         });
     }
