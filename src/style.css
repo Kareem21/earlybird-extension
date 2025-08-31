@@ -1,13 +1,13 @@
-.earlybird-highlight {
-  border: 3px solid #88aaee !important;
-  border-radius: 10px;
-}
-
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap");
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+.earlybird-highlight {
+    border: 3px solid #88aaee !important;
+    border-radius: 10px;
+}
 
 :root {
     --sb-track-color: #ffffff;
