@@ -1,7 +1,7 @@
 import { Storage } from "@plasmohq/storage"
 import { initTRPC } from '@trpc/server';
 import { createChromeHandler } from 'trpc-chrome/adapter';
-import { z } from 'zod';
+import * as z from 'zod';
 import Papa from 'papaparse';
 import { db } from "~db";
 import pLimit from 'p-limit';

@@ -70,9 +70,7 @@
       "https://*.earlybirdjobs.io/*",
       "<all_urls>"
     ],
-    "permissions": [
-      "webRequest"
-    ]
+    "permissions": []
   },
   "pnpm": {
     "overrides": {
